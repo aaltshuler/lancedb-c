@@ -27,6 +27,12 @@ struct StackJob {
   LanceDBError result = LANCEDB_UNKNOWN;
   char* error_message = nullptr;
   uint64_t count = 0;
+
+  StackJob(void (*f)(StackJob&), LanceDBTable* t) : fn(f), table(t) {}
+  StackJob(const StackJob&) = delete;
+  StackJob& operator=(const StackJob&) = delete;
+  // error_message is owned by the library; free it on every path
+  ~StackJob() { if (error_message) lancedb_free_string(error_message); }
 };
 
 extern "C" void* stack_job_trampoline(void* p) {

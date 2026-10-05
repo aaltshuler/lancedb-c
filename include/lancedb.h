@@ -811,6 +811,13 @@ typedef struct {
 LanceDBError lancedb_runtime_configure(const LanceDBRuntimeOptions* options, char** error_message);
 
 /**
+ * Test hooks (present only in libraries built with the `test-hooks` cargo
+ * feature, which the CMake test build enables). Not part of the API.
+ */
+LanceDBError lancedb_test_panic_in_task(char** error_message);
+LanceDBError lancedb_test_call_from_runtime(char** error_message);
+
+/**
  * Threading model
  *
  * Every database-executing function in this API is synchronous from the
