@@ -426,3 +426,90 @@ fn small_stack_caller_can_run_deep_work() {
         .unwrap();
     assert_eq!(handle.join().unwrap(), 512);
 }
+
+/// Synthetic sleeping-task memory sample, for review. Ignored by default; run
+/// it alone, once per stack size:
+///
+/// ```text
+/// LANCEDB_C_WORKER_STACK_SIZE=2097152 cargo test --lib -- --ignored \
+///     --nocapture measure_worker_stack_memory
+/// ```
+///
+/// `LANCEDB_C_MEASURE_CALLERS` sets the number of concurrent callers
+/// (default 256). The two modes sleep asynchronously or in `block_in_place`.
+/// They exercise Tokio scheduling but do not measure actual Lance query or
+/// Ceph object-store stack usage. Each workload is sampled once after 150 ms;
+/// VmRSS and VmSize are observations, not measured maxima. VmHWM is the
+/// process-wide resident-memory high-water mark. Linux only (/proc/self/status).
+#[test]
+#[ignore = "measurement aid; run explicitly with --ignored"]
+#[cfg(target_os = "linux")]
+fn measure_worker_stack_memory() {
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    fn status(field: &str) -> String {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .find(|l| l.starts_with(field))
+            .map(|l| l.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+            .unwrap_or_else(|| "?".to_string())
+    }
+    fn report(label: &str) {
+        println!(
+            "{label:<22} threads={:<5} VmRSS={:<12} VmHWM={:<12} VmSize={}",
+            status("Threads:"),
+            status("VmRSS:"),
+            status("VmHWM:"),
+            status("VmSize:")
+        );
+    }
+
+    let callers: usize = std::env::var("LANCEDB_C_MEASURE_CALLERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
+    let hold = Duration::from_millis(300);
+    let opts = effective_options();
+    let workers = if opts.worker_threads == 0 {
+        default_worker_threads().unwrap()
+    } else {
+        opts.worker_threads
+    };
+    println!(
+        "callers={callers} hold={hold:?} worker_stack={} worker_threads={workers}",
+        opts.worker_stack_size
+    );
+    report("idle");
+    run_blocking(async { Ok(()) }).unwrap();
+    report("warm");
+
+    for (mode, blocking) in [("async-wait", false), ("block_in_place", true)] {
+        let barrier = Arc::new(Barrier::new(callers));
+        let handles: Vec<_> = (0..callers)
+            .map(|_| {
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    run_blocking(async move {
+                        if blocking {
+                            tokio::task::block_in_place(|| std::thread::sleep(hold));
+                        } else {
+                            tokio::time::sleep(hold).await;
+                        }
+                        Ok(())
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        std::thread::sleep(hold / 2);
+        report(&format!("sample {mode}"));
+        for h in handles {
+            h.join().unwrap();
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        report(&format!("after {mode}"));
+    }
+}
