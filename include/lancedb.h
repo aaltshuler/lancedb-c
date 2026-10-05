@@ -776,6 +776,41 @@ void lancedb_session_free(LanceDBSession* session);
 void lancedb_table_free(LanceDBTable* table);
 
 /**
+ * Configuration for the C wrapper's process-wide Tokio runtime.
+ * These settings do not configure Lance's separate CPU pool or impose a
+ * process-wide limit on background indexing or compaction CPU usage.
+ */
+typedef struct {
+    size_t worker_threads;        // Tokio worker threads (0 = number of CPUs)
+    size_t worker_stack_size;     // worker and blocking-pool stack bytes (0 = 8 MiB)
+    size_t max_blocking_threads;  // additional blocking-pool threads (0 = 512)
+} LanceDBRuntimeOptions;
+
+/** Smallest accepted worker stack size (bytes); not a guarantee that every query fits. */
+#define LANCEDB_MIN_WORKER_STACK_SIZE (2 * 1024 * 1024)
+
+/**
+ * Configure the runtime the library creates on first use.
+ *
+ * Must be called once, before the first database call. Repeated or late
+ * configuration fails with LANCEDB_RUNTIME. NULL options or structurally
+ * invalid option values, including a nonzero worker_stack_size below
+ * LANCEDB_MIN_WORKER_STACK_SIZE, fail with LANCEDB_INVALID_ARGUMENT.
+ * The supported worker count is at most 65535; stack sizes must fit in
+ * ptrdiff_t, and the combined worker/blocking count must fit in size_t.
+ * Fields left at 0 use the corresponding environment overrides or defaults.
+ *
+ * Configuration does not allocate the runtime. A database call that cannot
+ * initialize the runtime reports LANCEDB_RUNTIME. Accepting a stack size
+ * does not guarantee sufficient stack space for every workload or build.
+ *
+ * @param options - runtime parameters (must not be NULL)
+ * @param error_message - can be NULL to ignore detailed error messages
+ * @return error code
+ */
+LanceDBError lancedb_runtime_configure(const LanceDBRuntimeOptions* options, char** error_message);
+
+/**
  * Threading model
  *
  * Every database-executing function in this API is synchronous from the
@@ -786,7 +821,10 @@ void lancedb_table_free(LanceDBTable* table);
  * fibers with small fixed-size stacks. The worker stack size defaults to
  * 8 MiB and can be overridden with the LANCEDB_C_WORKER_STACK_SIZE
  * environment variable (bytes); LANCEDB_C_WORKER_THREADS overrides the
- * worker count.
+ * worker count. LANCEDB_C_MAX_BLOCKING_THREADS overrides the limit on
+ * additional blocking-pool threads.
+ * When no C or LANCEDB_C worker count is set, TOKIO_WORKER_THREADS is used
+ * if present; otherwise the worker count defaults to the number of CPUs.
  *
  * Do not call this API from within a tokio async context (e.g. from a task
  * running on the library's own runtime); doing so is reported as
@@ -797,6 +835,19 @@ void lancedb_table_free(LanceDBTable* table);
  * than the one that produced them. Producers must therefore tolerate
  * release callbacks from another thread — the Arrow C data interface does
  * not require this by itself.
+ *
+ * The worker count, stack size and blocking-thread limit can be set from C
+ * with lancedb_runtime_configure() before the first database call; the
+ * environment variables above remain as a fallback. Nonzero stack sizes
+ * below LANCEDB_MIN_WORKER_STACK_SIZE are rejected by the configure call;
+ * smaller positive environment values are clamped to that minimum. The
+ * minimum is an acceptance threshold, not a guarantee that every query fits:
+ * insufficient stack space can cause a fatal stack overflow. Validate lower
+ * stack settings with the intended workloads and build configuration.
+ *
+ * These controls apply to the wrapper's Tokio runtime, not Lance's separate
+ * CPU pool. The blocking-thread limit excludes the configured worker count
+ * and does not bound queued work, in-flight requests, or process-wide CPU use.
  */
 /**
  * Create a new table with Arrow schema

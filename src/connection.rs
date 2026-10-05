@@ -90,6 +90,64 @@ const DEFAULT_METADATA_CACHE_SIZE_BYTES: usize = 1024 * 1024 * 1024;
 /// Runtime to handle async operations (see `crate::runtime`).
 use crate::runtime::{run_blocking, run_blocking_infallible};
 
+/// Parameters for the C wrapper's process-wide Tokio runtime.
+/// These do not configure Lance's separate CPU pool or impose a process-wide
+/// CPU limit on background indexing and compaction.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LanceDBRuntimeOptions {
+    /// Number of Tokio worker threads (0 = number of CPUs).
+    pub worker_threads: usize,
+    /// Worker and blocking-pool thread stack size in bytes (0 = default of
+    /// 8 MiB; otherwise at least LANCEDB_MIN_WORKER_STACK_SIZE). The minimum
+    /// is an acceptance threshold, not a guarantee that every query fits.
+    pub worker_stack_size: usize,
+    /// Additional blocking-pool thread limit, excluding the worker count
+    /// (0 = tokio's default of 512). This does not bound queued work.
+    pub max_blocking_threads: usize,
+}
+
+/// Configure the runtime the library will create on first use.
+///
+/// Must be called once, before the first database call. Repeated or late
+/// configuration fails with `LANCEDB_RUNTIME`. NULL options or structurally
+/// invalid option values, including a nonzero stack size below the minimum,
+/// fail with `LANCEDB_INVALID_ARGUMENT`. Fields left at 0 use the
+/// `LANCEDB_C_WORKER_THREADS`, `LANCEDB_C_WORKER_STACK_SIZE` and
+/// `LANCEDB_C_MAX_BLOCKING_THREADS` environment overrides or defaults.
+///
+/// Configuration does not allocate the runtime. A database call that cannot
+/// initialize the runtime reports `LANCEDB_RUNTIME`. Accepting a stack size
+/// does not guarantee sufficient stack space for every workload or build.
+///
+/// # Safety
+/// - `options` must be a valid pointer (NULL resets nothing and is an error)
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_runtime_configure(
+    options: *const LanceDBRuntimeOptions,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if options.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+    let o = &*options;
+    match crate::runtime::configure(crate::runtime::RuntimeOptions {
+        worker_threads: o.worker_threads,
+        worker_stack_size: o.worker_stack_size,
+        max_blocking_threads: o.max_blocking_threads,
+    }) {
+        Ok(()) => LanceDBError::Success,
+        // a rejected option value is the caller's argument, not library input
+        Err(lancedb::error::Error::InvalidInput { message }) => {
+            set_custom_error_message(error_message, &message);
+            LanceDBError::InvalidArgument
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
 /// Create a ConnectBuilder for the given URI
 ///
 /// # Safety
